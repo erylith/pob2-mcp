@@ -360,6 +360,57 @@ def get_full_stats() -> str:
     return format_result(result)
 
 
+@mcp.tool()
+def get_stat(key: str) -> str:
+    """Retrieve a specific stat value from the full calculation output.
+    
+    Args:
+        key: The stat key name (e.g., "TotalDPS", "Life", "CritChance", "Speed")
+    
+    Returns the value of that specific stat. Use this instead of get_full_stats
+    when you only need one or a few specific values to avoid flooding the context.
+    """
+    result = call("get_stat", {"key": key})
+    if not result.get("found"):
+        return f"Stat '{key}' not found."
+    value = result.get("value")
+    if result.get("type") == "table":
+        table_data = value if isinstance(value, dict) else {}
+        return f"{key} (table with {result.get('table_size', '?')} entries): {format_result(table_data)}"
+    return f"{key}: {value}"
+
+
+@mcp.tool()
+def get_stats_list(keys: list[str]) -> str:
+    """Retrieve multiple specific stats at once from the calculation output.
+    
+    Args:
+        keys: List of stat key names to retrieve (e.g., ["TotalDPS", "Life", "Speed"])
+    
+    Returns multiple stat values in a single call. More efficient than calling
+    get_stat multiple times when you need several stats.
+    """
+    result = call("get_stats_list", {"keys": keys})
+    found = result.get("found", {})
+    not_found = result.get("not_found", [])
+    
+    output = []
+    output.append(f"Retrieved {result.get('found_count', 0)}/{result.get('count', 0)} stats:\n")
+    
+    for key, data in found.items():
+        value = data.get("value")
+        if data.get("type") == "table":
+            table_data = value if isinstance(value, dict) else {}
+            output.append(f"{key} (table): {format_result(table_data)}")
+        else:
+            output.append(f"{key}: {value}")
+    
+    if not_found:
+        output.append(f"\nNot found: {', '.join(not_found)}")
+    
+    return "\n".join(output)
+
+
 # ============================================================================
 # Config tools
 # ============================================================================

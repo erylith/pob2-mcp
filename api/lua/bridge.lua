@@ -1199,6 +1199,112 @@ function commands.get_full_output(params)
 	return safeSerialize(output, 0) or {}
 end
 
+function commands.get_stat(params)
+	if not build or not build.calcsTab then
+		error("No build loaded")
+	end
+	local output = build.calcsTab.mainOutput
+	if not output then
+		error("No calculation output available")
+	end
+	
+	local key = params.key
+	if not key then
+		error("Missing 'key' parameter")
+	end
+	
+	local val = output[key]
+	if val == nil then
+		return { found = false, key = key }
+	end
+	
+	-- For simple values, return directly
+	local t = type(val)
+	if t == "number" or t == "string" or t == "boolean" then
+		return { found = true, key = key, value = val, type = t }
+	end
+	
+	-- For tables, return a preview
+	if t == "table" then
+		local preview = {}
+		local count = 0
+		local maxPreview = 10
+		for k, v in pairs(val) do
+			if type(v) == "number" or type(v) == "string" or type(v) == "boolean" then
+				preview[tostring(k)] = v
+				count = count + 1
+				if count >= maxPreview then
+					break
+				end
+			end
+		end
+		return { 
+			found = true, 
+			key = key, 
+			type = "table", 
+			value = preview,
+			table_size = count
+		}
+	end
+	
+	-- Other types (function, etc.)
+	return { found = true, key = key, type = t, value = tostring(val) }
+end
+
+function commands.get_stats_list(params)
+	if not build or not build.calcsTab then
+		error("No build loaded")
+	end
+	local output = build.calcsTab.mainOutput
+	if not output then
+		error("No calculation output available")
+	end
+	
+	local keys = params.keys
+	if not keys or type(keys) ~= "table" then
+		error("Missing or invalid 'keys' parameter - must be a list of stat keys")
+	end
+	
+	local results = {}
+	local notFound = {}
+	
+	for _, key in ipairs(keys) do
+		local val = output[key]
+		if val == nil then
+			table.insert(notFound, key)
+		else
+			local t = type(val)
+			if t == "number" or t == "string" or t == "boolean" then
+				results[key] = { value = val, type = t }
+			elseif t == "table" then
+				-- For tables, include a preview
+				local preview = {}
+				local count = 0
+				local maxPreview = 5
+				for k, v in pairs(val) do
+					if type(v) == "number" or type(v) == "string" or type(v) == "boolean" then
+						preview[tostring(k)] = v
+						count = count + 1
+						if count >= maxPreview then
+							break
+						end
+					end
+				end
+				results[key] = { value = preview, type = "table", table_size = count }
+			else
+				results[key] = { value = tostring(val), type = t }
+			end
+		end
+	end
+	
+	return { 
+		found = results, 
+		not_found = notFound,
+		count = #keys,
+		found_count = #keys - #notFound
+	}
+end
+
 function commands.set_config(params)
 	if not build or not build.configTab then
 		error("No build loaded")
