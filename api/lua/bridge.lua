@@ -1305,6 +1305,246 @@ function commands.get_stats_list(params)
 	}
 end
 
+-- ============================================================================
+-- Modifier tier query commands
+-- ============================================================================
+
+function commands.search_modifiers(params)
+	if not build or not build.data or not build.data.itemMods then
+		error("No build loaded")
+	end
+	
+	local query = (params.query or ""):lower()
+	local modType = params.mod_type or "Item" -- "Item", "Flask", "Charm", "Jewel", etc.
+	local maxResults = params.max_results or 30
+	
+	if query == "" then
+		error("Missing 'query' parameter")
+	end
+	
+	local modSource = build.data.itemMods[modType]
+	if not modSource then
+		error("Invalid mod_type: " .. modType)
+	end
+	
+	local groups = {}
+	local seenGroups = {}
+	local count = 0
+	
+	for modId, modData in pairs(modSource) do
+		-- Check if mod matches query
+		local match = false
+		if modId:lower():find(query, 1, true) then
+			match = true
+		elseif modData.affix and modData.affix:lower():find(query, 1, true) then
+			match = true
+		elseif modData[1] and modData[1]:lower():find(query, 1, true) then
+			match = true
+		elseif modData.group and modData.group:lower():find(query, 1, true) then
+			match = true
+		end
+		
+		if match then
+			local group = modData.group or modId
+			if not seenGroups[group] then
+				seenGroups[group] = true
+				
+				-- Get tier count for this group
+				local tierCount = 0
+				for id, data in pairs(modSource) do
+					if data.group == group then
+						tierCount = tierCount + 1
+					end
+				end
+				
+				table.insert(groups, {
+					group = group,
+					mod_id = modId,
+					type = modData.type, -- "Prefix" or "Suffix"
+					affix = modData.affix,
+					mod_text = modData[1],
+					level = modData.level,
+					tier_count = tierCount,
+					mod_tags = modData.modTags,
+				})
+				
+				count = count + 1
+				if count >= maxResults then
+					break
+				end
+			end
+		end
+	end
+	
+	-- Sort by level
+	table.sort(groups, function(a, b)
+		if a.level and b.level then
+			return a.level < b.level
+		end
+		return a.group < b.group
+	end)
+	
+	return { groups = groups, count = count, mod_type = modType }
+end
+
+function commands.get_modifier_tiers(params)
+	if not build or not build.data or not build.data.itemMods then
+		error("No build loaded")
+	end
+	
+	local group = params.group
+	local modType = params.mod_type or "Item"
+	
+	if not group then
+		error("Missing 'group' parameter")
+	end
+	
+	local modSource = build.data.itemMods[modType]
+	if not modSource then
+		error("Invalid mod_type: " .. modType)
+	end
+	
+	local tiers = {}
+	
+	for modId, modData in pairs(modSource) do
+		if modData.group == group then
+			-- Extract tier number from modId (e.g., "Strength5" → 5)
+			local tierNum = modId:match("%d+$")
+			
+			table.insert(tiers, {
+				mod_id = modId,
+				tier = tonumber(tierNum) or 1,
+				affix = modData.affix,
+				mod_text = modData[1],
+				level = modData.level,
+				stat_order = modData.statOrder,
+				weight_key = modData.weightKey,
+				mod_tags = modData.modTags,
+			})
+		end
+	end
+	
+	-- Sort by tier (ascending)
+	table.sort(tiers, function(a, b)
+		return a.tier < b.tier
+	end)
+	
+	return { 
+		group = group, 
+		tiers = tiers, 
+		count = #tiers,
+		mod_type = modType
+	}
+end
+
+function commands.get_modifiers_for_item_type(params)
+	if not build or not build.data or not build.data.itemMods then
+		error("No build loaded")
+	end
+	
+	local itemType = (params.item_type or ""):lower()
+	local modType = params.mod_type or "Item"
+	local prefixOrSuffix = params.affix_type -- "Prefix", "Suffix", or nil for both
+	local maxResults = params.max_results or 50
+	
+	if itemType == "" then
+		error("Missing 'item_type' parameter")
+	end
+	
+	local modSource = build.data.itemMods[modType]
+	if not modSource then
+		error("Invalid mod_type: " .. modType)
+	end
+	
+	local modifiers = {}
+	local seenGroups = {}
+	local count = 0
+	
+	for modId, modData in pairs(modSource) do
+		-- Check if this modifier can roll on the item type
+		local canRoll = false
+		if modData.weightKey and modData.weightVal then
+			for i, key in ipairs(modData.weightKey) do
+				if key:lower() == itemType or key:lower():find(itemType, 1, true) then
+					local weight = modData.weightVal[i]
+					if weight and weight > 0 then
+						canRoll = true
+						break
+					end
+				end
+			end
+		end
+		
+		if canRoll then
+			local group = modData.group or modId
+			
+			-- Filter by prefix/suffix if specified
+			if prefixOrSuffix and modData.type ~= prefixOrSuffix then
+				canRoll = false
+			end
+			
+			if canRoll and not seenGroups[group] then
+				seenGroups[group] = true
+				
+				-- Count tiers for this group
+				local tierCount = 0
+				for id, data in pairs(modSource) do
+					if data.group == group then
+						tierCount = tierCount + 1
+					end
+				end
+				
+				table.insert(modifiers, {
+					group = group,
+					mod_id = modId,
+					type = modData.type,
+					affix = modData.affix,
+					mod_text = modData[1],
+					level = modData.level,
+					tier_count = tierCount,
+					mod_tags = modData.modTags,
+				})
+				
+				count = count + 1
+				if count >= maxResults then
+					break
+				end
+			end
+		end
+	end
+	
+	-- Sort by level
+	table.sort(modifiers, function(a, b)
+		if a.level and b.level then
+			return a.level < b.level
+		end
+		return a.group < b.group
+	end)
+	
+	return { 
+		modifiers = modifiers, 
+		count = count, 
+		item_type = itemType,
+		mod_type = modType
+	}
+end
+
+function commands.get_modifier_types(params)
+	if not build or not build.data or not build.data.itemMods then
+		error("No build loaded")
+	end
+	
+	local types = {}
+	for typeName, _ in pairs(build.data.itemMods) do
+		table.insert(types, typeName)
+	end
+	
+	-- Sort alphabetically
+	table.sort(types)
+	
+	return { types = types, count = #types }
+end
+
 function commands.set_config(params)
 	if not build or not build.configTab then
 		error("No build loaded")

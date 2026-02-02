@@ -411,6 +411,109 @@ def get_stats_list(keys: list[str]) -> str:
     return "\n".join(output)
 
 
+@mcp.tool()
+def search_modifiers(query: str, mod_type: str = "Item", max_results: int = 30) -> str:
+    """Search for modifier groups by name, affix, or effect text.
+    
+    Args:
+        query: Search text to find modifiers (e.g., "life", "resist", "damage")
+        mod_type: Type of modifiers to search ("Item", "Flask", "Charm", "Jewel", "Corruption")
+        max_results: Maximum number of modifier groups to return
+    
+    Returns modifier groups with tier count and basic info. Use get_modifier_tiers
+    to see all tiers for a specific group.
+    """
+    result = call("search_modifiers", {"query": query, "mod_type": mod_type, "max_results": max_results})
+    groups = result.get("groups", [])
+    if not groups:
+        return f"No modifiers found matching '{query}' in {mod_type}."
+    return format_result(groups)
+
+
+@mcp.tool()
+def get_modifier_tiers(group: str, mod_type: str = "Item") -> str:
+    """Get all tiers for a specific modifier group with their ranges and requirements.
+    
+    Args:
+        group: The modifier group name (e.g., "LifeRegeneration", "Strength", "FireResistance")
+        mod_type: Type of modifiers ("Item", "Flask", "Charm", "Jewel", "Corruption")
+    
+    Returns all tiers sorted from lowest (tier 1) to highest, showing:
+    - Tier number and affix name
+    - Stat ranges (e.g., "+(5-8) to Strength")
+    - Required item level
+    - Which item types can roll it
+    """
+    result = call("get_modifier_tiers", {"group": group, "mod_type": mod_type})
+    tiers = result.get("tiers", [])
+    if not tiers:
+        return f"No tiers found for group '{group}' in {mod_type}."
+    
+    output = [f"Modifier Group: {group} ({len(tiers)} tiers)\n"]
+    for tier in tiers:
+        output.append(f"T{tier['tier']}: {tier['affix']} (Level {tier['level']})")
+        output.append(f"  {tier['mod_text']}")
+        if tier.get('mod_tags'):
+            output.append(f"  Tags: {', '.join(tier['mod_tags'])}")
+        output.append("")
+    
+    return "\n".join(output)
+
+
+@mcp.tool()
+def get_modifiers_for_item_type(item_type: str, mod_type: str = "Item", 
+                                  affix_type: str | None = None, max_results: int = 50) -> str:
+    """Get all modifiers that can roll on a specific item type.
+    
+    Args:
+        item_type: The item type tag (e.g., "helmet", "ring", "body_armour", "bow")
+        mod_type: Type of modifiers ("Item", "Flask", "Charm", "Jewel", "Corruption")
+        affix_type: Filter by "Prefix" or "Suffix" (default: both)
+        max_results: Maximum number of modifiers to return
+    
+    Returns all modifier groups available on that item type, sorted by level.
+    Use get_modifier_tiers to see the full tier breakdown for any group.
+    """
+    params = {
+        "item_type": item_type,
+        "mod_type": mod_type,
+        "max_results": max_results
+    }
+    if affix_type:
+        params["affix_type"] = affix_type
+    
+    result = call("get_modifiers_for_item_type", params)
+    modifiers = result.get("modifiers", [])
+    if not modifiers:
+        filter_text = f" {affix_type.lower()}" if affix_type else ""
+        return f"No{filter_text} modifiers found for item type '{item_type}' in {mod_type}."
+    return format_result(modifiers)
+
+
+@mcp.tool()
+def get_modifier_types() -> str:
+    """List all available modifier type categories.
+    
+    Returns the different modifier databases available for querying:
+    - Item: Regular item modifiers (prefixes/suffixes)
+    - Flask: Flask modifiers
+    - Charm: Charm modifiers
+    - Jewel: Jewel-specific modifiers
+    - Corruption: Corrupted modifiers
+    - Runes: Rune modifiers
+    - IncursionLimb: Incursion limb modifiers
+    - Exclusive: Exclusive/special modifiers
+    
+    Use these type names with search_modifiers, get_modifier_tiers, and
+    get_modifiers_for_item_type functions.
+    """
+    result = call("get_modifier_types")
+    types = result.get("types", [])
+    if not types:
+        return "No modifier types found."
+    return format_result(types)
+
+
 # ============================================================================
 # Config tools
 # ============================================================================
