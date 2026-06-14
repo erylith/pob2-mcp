@@ -25,6 +25,33 @@ mcp = FastMCP(
 # Global bridge instance, initialized on first use
 _bridge: LuaBridge | None = None
 
+class ChatGPTAuthMiddleware:
+    def __init__(self, inner_app, token: str):
+        self.inner_app = inner_app
+        self.expected_auth = f"Bearer {token}"
+
+    async def __call__(self, scope, receive, send):
+        # Only intercept standard HTTP requests (skip lifespan or websocket scopes)
+        if scope["type"] == "http":
+            headers = dict(scope.get("headers", []))
+            # ASGI headers are stored as raw bytes, so look up b"authorization"
+            auth_header = headers.get(b"authorization", b"").decode("utf-8")
+            
+            if auth_header != self.expected_auth:
+                # Instantly slam the door with a 401 Unauthorized
+                await send({
+                    "type": "http.response.start",
+                    "status": 401,
+                    "headers": [(b"content-type", b"application/json")],
+                })
+                await send({
+                    "type": "http.response.body",
+                    "body": b'{"detail": "Unauthorized: Missing or invalid token."}',
+                })
+                return
+                
+        # Valid token (or non-HTTP payload). Hand execution off to FastMCP.
+        await self.inner_app(scope, receive, send)
 
 def get_bridge() -> LuaBridge:
     """Get or create the global LuaBridge instance."""
@@ -342,9 +369,9 @@ def get_stats(keys: list[str] | None = None) -> str:
 
     Args:
         keys: Optional list of specific stat keys to retrieve. If omitted, returns
-              curated important stats. Common keys include: TotalDPS, CombinedDPS,
-              FullDPS, Life, EnergyShield, Mana, FireResist, ColdResist,
-              LightningResist, ChaosResist, Armour, Evasion, TotalEHP, Speed, etc.
+            curated important stats. Common keys include: TotalDPS, CombinedDPS,
+            FullDPS, Life, EnergyShield, Mana, FireResist, ColdResist,
+            LightningResist, ChaosResist, Armour, Evasion, TotalEHP, Speed, etc.
     """
     params = {}
     if keys:
@@ -462,17 +489,21 @@ def get_modifier_tiers(group: str, mod_type: str = "Item") -> str:
 
 @mcp.tool()
 def get_modifiers_for_item_type(item_type: str, mod_type: str = "Item", 
-                                  affix_type: str | None = None, max_results: int = 50) -> str:
+                                affix_type: str | None = None, max_results: int = 50) -> str:
     """Get all modifiers that can roll on a specific item type.
     
     Args:
-        item_type: The item type tag (e.g., "helmet", "ring", "body_armour", "bow")
+        item_type: The item type tag (e.g., "helmet", "ring", "body_armour", "bow", "sword")
+                Supports partial matching: "sword" matches "sword", "two_hand_sword", etc.
         mod_type: Type of modifiers ("Item", "Flask", "Charm", "Jewel", "Corruption")
         affix_type: Filter by "Prefix" or "Suffix" (default: both)
         max_results: Maximum number of modifiers to return
     
     Returns all modifier groups available on that item type, sorted by level.
     Use get_modifier_tiers to see the full tier breakdown for any group.
+    
+    Tip: Use get_item_modifier_tags() to see all available item type tags,
+    or search_item_types() to find which tag to use for your item.
     """
     params = {
         "item_type": item_type,
@@ -486,7 +517,7 @@ def get_modifiers_for_item_type(item_type: str, mod_type: str = "Item",
     modifiers = result.get("modifiers", [])
     if not modifiers:
         filter_text = f" {affix_type.lower()}" if affix_type else ""
-        return f"No{filter_text} modifiers found for item type '{item_type}' in {mod_type}."
+        return f"No{filter_text} modifiers found for item type '{item_type}' in {mod_type}. Try using search_item_types() to find the correct tag."
     return format_result(modifiers)
 
 
@@ -514,6 +545,66 @@ def get_modifier_types() -> str:
     return format_result(types)
 
 
+@mcp.tool()
+def get_item_modifier_tags(mod_type: str = "Item") -> str:
+    """List all item type tags that can have modifiers.
+    
+    Args:
+        mod_type: Type of modifiers to check ("Item", "Flask", "Charm", "Jewel", "Corruption")
+    
+    Returns all unique item type tags found in the modifier database.
+    These tags are used with get_modifiers_for_item_type() to query which
+    modifiers can roll on specific item types.
+    
+    Common tags include:
+    - Armour: helmet, body_armour, gloves, boots, shield
+    - Weapons: sword, mace, axe, bow, staff, wand, dagger, claw
+    - Accessories: ring, amulet, belt, quiver
+    - Special: str_armour, dex_armour, int_armour (attribute-based armour)
+    """
+    result = call("get_item_modifier_tags", {"mod_type": mod_type})
+    tags = result.get("tags", [])
+    if not tags:
+        return f"No modifier tags found for {mod_type}."
+    return format_result(tags)
+
+
+@mcp.tool()
+def search_item_types(query: str, max_results: int = 50) -> str:
+    """Search for item types by name or category.
+    
+    Args:
+        query: Search term to find item types (e.g., "sword", "armour", "ring")
+        max_results: Maximum number of item types to return
+    
+    Returns matching item types with example base items and their tags.
+    This helps you find the correct item_type tag to use with 
+    get_modifiers_for_item_type().
+    
+    Example: search_item_types("sword") returns:
+    - "One Handed Sword" with tags
+    - "Two Handed Sword" with tags
+    etc.
+    """
+    result = call("search_item_types", {"query": query, "max_results": max_results})
+    types = result.get("types", [])
+    if not types:
+        return f"No item types found matching '{query}'."
+    
+    output = [f"Found {len(types)} item type(s) matching '{query}':\n"]
+    for item_type in types:
+        output.append(f"Type: {item_type['type']}")
+        output.append(f"  Example base: {item_type['example_base']}")
+        if item_type.get('tags'):
+            tags_str = ", ".join(item_type['tags'][:10])  # Limit tags shown
+            if len(item_type['tags']) > 10:
+                tags_str += f" (+{len(item_type['tags']) - 10} more)"
+            output.append(f"  Tags: {tags_str}")
+        output.append("")
+    
+    return "\n".join(output)
+
+
 # ============================================================================
 # Config tools
 # ============================================================================
@@ -536,7 +627,7 @@ def set_custom_mods(mods: str) -> str:
 
     Args:
         mods: Custom modifier text, one modifier per line. Example:
-              "10% increased Attack Speed\\n20% increased Physical Damage"
+            "10% increased Attack Speed\\n20% increased Physical Damage"
     """
     call("set_custom_mods", {"mods": mods})
     return "Custom mods applied."
@@ -657,20 +748,20 @@ def run_server():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Transport modes:
-  stdio          - Standard input/output mode (default, for Claude Desktop)
-  sse            - HTTP streaming with Server-Sent Events
+stdio          - Standard input/output mode (default, for Claude Desktop)
+sse            - HTTP streaming with Server-Sent Events
 
 Examples:
-  %(prog)s                          # Run in stdio mode (default)
-  %(prog)s --transport sse          # Run HTTP streaming on default port
-  %(prog)s --transport sse --port 8080 --host 0.0.0.0
+%(prog)s                          # Run in stdio mode (default)
+%(prog)s --transport sse          # Run HTTP streaming on default port
+%(prog)s --transport sse --port 8080 --host 0.0.0.0
         """,
     )
     parser.add_argument(
         "--transport",
-        choices=["stdio", "sse"],
+        choices=["stdio", "sse", "streamable-http"],
         default="stdio",
-        help="Transport mode: 'stdio' for standard input/output, 'sse' for HTTP streaming (default: stdio)",
+        help="Transport mode: 'stdio' for standard input/output, 'sse' for SSE, 'streamable-http' for http streaming     streaming (default: stdio)",
     )
     parser.add_argument(
         "--host",
@@ -689,7 +780,12 @@ Examples:
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         help="Logging level (default: INFO)",
     )
-
+    parser.add_argument(
+        "--api-secret",
+        default=None,
+        #choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Bearer token used for Chat GPT auth",
+    )
     args = parser.parse_args()
 
     # Configure logging
@@ -706,7 +802,24 @@ Examples:
         import uvicorn
         app = mcp.sse_app()
         logger.info(f"Starting MCP server in HTTP streaming mode on {args.host}:{args.port}")
-        #mcp.run(transport="sse", host=args.host, port=args.port)
-        uvicorn.run(app, host=args.host, port=args.port)
-    else:
-        parser.error(f"Unknown transport: {args.transport}")
+        if args.api_secret:
+            secured_app = ChatGPTAuthMiddleware(app, token=args.api_secret)
+            uvicorn.run(secured_app, host=args.host, port=args.port)
+        else:
+            #mcp.run(transport="sse", host=args.host, port=args.port)
+            uvicorn.run(app, host=args.host, port=args.port)
+    elif args.transport == "streamable-http":
+        import uvicorn
+        app = mcp.streamable_http_app()
+        logger.info(
+            "Starting MCP Streamable HTTP server on http://%s:%s/mcp",
+            args.host,
+            args.port,
+        )
+        if args.api_secret:
+            secured_app = ChatGPTAuthMiddleware(app, token=args.api_secret)
+            uvicorn.run(secured_app, host=args.host, port=args.port)
+        else:
+            uvicorn.run(app, host=args.host, port=args.port)
+    #else:
+    #    parser.error(f"Unknown transport: {args.transport}")
