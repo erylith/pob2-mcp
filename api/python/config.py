@@ -28,3 +28,6 @@ BRIDGE_COMMAND_TIMEOUT = float(os.environ.get("POB_BRIDGE_COMMAND_TIMEOUT", "30.
 
 # Builds directory path override
 BUILDS_PATH = os.environ.get("POB_BUILDS_PATH")  # Optional override passed to Lua bridge
+
+# Bridge pool
+BRIDGE_POOL_MAX_BUILDS = int(os.environ.get("POB_POOL_MAX_BUILDS", "4"))

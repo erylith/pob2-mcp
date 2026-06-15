@@ -5,14 +5,16 @@ the PoB calculation engine via a persistent LuaJIT subprocess.
 """
 
 import argparse
+import atexit
 import json
 import logging
 import sys
 
 from mcp.server.fastmcp import FastMCP
 
-from .config import DEFAULT_HOST, DEFAULT_PORT
-from .lua_bridge import LuaBridge, LuaBridgeError
+from .bridge_pool import LuaBridgePool
+from .config import BRIDGE_POOL_MAX_BUILDS, DEFAULT_HOST, DEFAULT_PORT
+from .lua_bridge import LuaBridgeError
 
 logger = logging.getLogger(__name__)
 
@@ -22,8 +24,8 @@ mcp = FastMCP(
     host="0.0.0.0",
 )
 
-# Global bridge instance, initialized on first use
-_bridge: LuaBridge | None = None
+# Global bridge pool, initialized on first use
+_pool: LuaBridgePool | None = None
 
 class ChatGPTAuthMiddleware:
     def __init__(self, inner_app, token: str):
@@ -53,19 +55,18 @@ class ChatGPTAuthMiddleware:
         # Valid token (or non-HTTP payload). Hand execution off to FastMCP.
         await self.inner_app(scope, receive, send)
 
-def get_bridge() -> LuaBridge:
-    """Get or create the global LuaBridge instance."""
-    global _bridge
-    if _bridge is None:
-        _bridge = LuaBridge()
-    if not _bridge.is_running:
-        _bridge.start()
-    return _bridge
+def get_pool() -> LuaBridgePool:
+    """Get or create the global LuaBridgePool instance."""
+    global _pool
+    if _pool is None:
+        _pool = LuaBridgePool(max_builds=BRIDGE_POOL_MAX_BUILDS)
+        atexit.register(_pool.shutdown_all)
+    return _pool
 
 
 def call(command: str, params: dict | None = None) -> dict:
-    """Call a bridge command, returning the result dict."""
-    return get_bridge().send_command(command, params)
+    """Call a bridge command on the active build, returning the result dict."""
+    return get_pool().call(command, params)
 
 
 def format_result(result: dict) -> str:
@@ -78,21 +79,25 @@ def format_result(result: dict) -> str:
 # ============================================================================
 
 @mcp.tool()
-def new_build() -> str:
-    """Create a new empty build. This resets all skills, items, and tree allocations."""
-    result = call("new_build")
-    return "New build created successfully."
+def new_build(name: str = "New Build") -> str:
+    """Create a new empty build and make it the active build in the pool.
+
+    Args:
+        name: A name for this build in the pool (default: 'New Build')
+    """
+    get_pool().load_build(name, new=True)
+    return f"New build '{name}' created and set as active."
 
 
 @mcp.tool()
 def load_build_xml(xml: str, name: str = "Imported Build") -> str:
-    """Load a build from its XML representation.
+    """Load a build from its XML representation and make it the active build in the pool.
 
     Args:
         xml: The full build XML content (as exported from Path of Building)
-        name: A name for the build
+        name: A name for this build in the pool
     """
-    call("load_build_xml", {"xml": xml, "name": name})
+    get_pool().load_build(name, xml=xml)
     info = call("get_build_info")
     return f"Build loaded: {info.get('buildName', name)}\n" + format_result(info)
 
@@ -698,18 +703,75 @@ def list_builds(sub_path: str = "") -> str:
 
 @mcp.tool()
 def load_build_file(path: str) -> str:
-    """Load a build from its file path.
+    """Load a build from its file path and make it the active build in the pool.
+
+    The filename (without .xml) is used as the build's pool name.
 
     Args:
         path: Full path to the build .xml file
     """
-    call("load_build_file", {"path": path})
+    from pathlib import Path as _Path
+    name = _Path(path).stem
+    get_pool().load_build(name, path=path)
     info = call("get_build_info")
     build_name = info.get("buildName", "Unknown")
     class_name = info.get("className", "Unknown")
     level = info.get("level", "Unknown")
-    
-    return f"Build loaded: {build_name}\nClass: {class_name} (Level {level})"
+    return f"Build loaded: {build_name} (pool name: '{name}')\nClass: {class_name} (Level {level})"
+
+
+# ============================================================================
+# Pool management tools
+# ============================================================================
+
+@mcp.tool()
+def list_loaded_builds() -> str:
+    """List all builds currently loaded in the pool, showing which is active.
+
+    Returns each build's pool name, whether it is the active build, and
+    whether its LuaJIT process is still running.
+    """
+    builds = get_pool().list_builds()
+    if not builds:
+        return "No builds loaded. Use load_build_file or load_build_xml to load one."
+    lines = []
+    for b in builds:
+        marker = " [active]" if b["active"] else ""
+        status = "" if b["is_running"] else " (not running)"
+        lines.append(f"  {b['name']}{marker}{status}")
+    return "Loaded builds:\n" + "\n".join(lines)
+
+
+@mcp.tool()
+def switch_active_build(name: str) -> str:
+    """Switch the active build. All subsequent tool calls will target this build.
+
+    Args:
+        name: Pool name of the build to activate (see list_loaded_builds)
+    """
+    get_pool().switch_build(name)
+    info = call("get_build_info")
+    build_name = info.get("buildName", name)
+    class_name = info.get("className", "Unknown")
+    level = info.get("level", "?")
+    return f"Switched to '{name}': {build_name} ({class_name}, Level {level})"
+
+
+@mcp.tool()
+def unload_build(name: str) -> str:
+    """Remove a build from the pool, freeing its LuaJIT process.
+
+    Args:
+        name: Pool name of the build to unload (see list_loaded_builds)
+    """
+    get_pool().unload_build(name)
+    active = get_pool().active_build
+    msg = f"Build '{name}' unloaded."
+    if active:
+        msg += f" Active build is now '{active}'."
+    else:
+        msg += " No active build remaining."
+    return msg
 
 
 @mcp.tool()
