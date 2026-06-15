@@ -199,10 +199,10 @@ def list_items() -> str:
 @mcp.tool()
 def get_item_details(item_id: int) -> str:
     """Get detailed information about a specific item in the build.
-    
+
     Args:
         item_id: The ID of the item (from list_items)
-    
+
     Returns full item data including:
     - Base stats (armour, weapon damage, etc.)
     - Quality, item level, corruption status
@@ -211,6 +211,78 @@ def get_item_details(item_id: int) -> str:
     """
     result = call("get_item_details", {"item_id": item_id})
     return format_result(result)
+
+
+@mcp.tool()
+def dump_item_fields(item_id: int) -> str:
+    """Debug: dump all scalar fields on a raw Lua item object.
+
+    Use this to discover the actual field names available on an item —
+    tables are shown as '<table>', functions as '<function>'.
+
+    Args:
+        item_id: The ID of the item (from list_items)
+    """
+    result = call("dump_item_fields", {"item_id": item_id})
+    return format_result(result.get("fields", {}))
+
+
+@mcp.tool()
+def get_all_equipped_items() -> str:
+    """Return full details for every equipped item in a single call.
+
+    Equivalent to calling get_item_details on each result from list_items
+    that has an equippedSlot, but in one round-trip. Each item includes
+    base stats, mods (implicits, explicits, enchants), socketed rune/idol
+    names, rune effects, socket counts, and the slot it occupies.
+    """
+    result = call("get_all_equipped_items")
+    items = result.get("items", [])
+    if not items:
+        return "No equipped items found."
+    return format_result(items)
+
+
+@mcp.tool()
+def get_item_impact(item_id: int, stats: list[str] | None = None) -> str:
+    """Show the stat impact of an equipped item by temporarily unequipping it and diffing.
+
+    Unequips the item, captures the stat delta, then re-equips it — all in one
+    call. Only returns stats that actually changed. Each changed stat shows the
+    value with the item, without it, and the difference.
+
+    Args:
+        item_id: ID of an equipped item (from list_items or get_all_equipped_items)
+        stats:   Optional list of specific stat keys to evaluate. Defaults to the
+                 standard curated stat set (DPS, life, resists, EHP, etc.)
+    """
+    params: dict = {"item_id": item_id}
+    if stats:
+        params["stats"] = stats
+    result = call("get_item_impact", params)
+    return format_result(result)
+
+
+@mcp.tool()
+def get_all_equipped_items_impact(stats: list[str] | None = None) -> str:
+    """Show the stat impact of every equipped item, evaluated one at a time.
+
+    For each equipped item, temporarily unequips it (with all others still on),
+    diffs the stats, then re-equips before moving to the next. Only changed
+    stats are returned per item.
+
+    Args:
+        stats: Optional list of specific stat keys to evaluate. Defaults to the
+               standard curated stat set (DPS, life, resists, EHP, etc.)
+    """
+    params: dict = {}
+    if stats:
+        params["stats"] = stats
+    result = call("get_all_equipped_items_impact", params if params else None)
+    items = result.get("items", [])
+    if not items:
+        return "No equipped items found."
+    return format_result(items)
 
 
 @mcp.tool()
@@ -636,12 +708,58 @@ def search_item_types(query: str, max_results: int = 50) -> str:
 
 
 # ============================================================================
+# Build flag / condition tools
+# ============================================================================
+
+@mcp.tool()
+def check_flag(flag: str) -> str:
+    """Check whether a build flag or condition is active for the current character.
+
+    Uses the fully-resolved post-calculation modDB, so it reflects passives,
+    items, and all other sources — the same way PoB evaluates conditions internally.
+
+    Args:
+        flag: The flag name to check. Examples:
+            "Condition:CanUseBondedModifiers"  — character can use Bonded idol/rune effects
+            "Condition:CanUseBondedModifiers" requires the passive
+            "Condition:CanSprint", "Condition:Fortified", etc.
+
+    Returns whether the flag is true or false for the loaded build.
+    """
+    result = call("check_flag", {"flag": flag})
+    value = result.get("value", False)
+    return f"{flag}: {value}"
+
+
+# ============================================================================
 # Config tools
 # ============================================================================
 
 @mcp.tool()
+def list_config_options() -> str:
+    """List all configuration options that are applicable to the current build.
+
+    Only returns options whose conditions are met (same visibility logic as the
+    PoB UI — e.g. buff toggles only appear if the build can actually use them).
+
+    Each option includes:
+    - var:   the key to pass to set_config
+    - type:  "check" (bool toggle), "count" (integer), or "list" (enum)
+    - label: human-readable description
+    - value: current setting (None means using default)
+    """
+    result = call("list_config_options")
+    options = result.get("options", [])
+    if not options:
+        return "No applicable config options for this build."
+    return format_result(options)
+
+
+@mcp.tool()
 def set_config(key: str, value: str | int | float | bool) -> str:
     """Set a configuration option for the build (e.g., enemy type, conditions).
+
+    Use list_config_options to see what's available and the var names to use.
 
     Args:
         key: Configuration key name (e.g., "enemyIsBoss", "conditionStationary")

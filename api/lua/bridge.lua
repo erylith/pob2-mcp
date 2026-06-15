@@ -861,33 +861,41 @@ function commands.list_items(params)
 	end
 	local items = {}
 	for id, item in pairs(build.itemsTab.items) do
+		local equippedSlot = nil
+		for slotName, slot in pairs(build.itemsTab.slots) do
+			if slot.selItemId == id then
+				equippedSlot = slotName
+				break
+			end
+		end
 		table.insert(items, {
 			id = id,
 			name = item.name or "Unknown",
 			baseName = item.baseName,
 			type = item.type,
 			rarity = item.rarity,
+			socketLimit = item.base and item.base.socketLimit or nil,
+			socketCount = item.itemSocketCount or 0,
+			runeCount = item.runes and #item.runes or 0,
+			equippedSlot = equippedSlot,
 		})
 	end
 	return { items = items }
 end
 
-function commands.get_item_details(params)
-	if not build or not build.itemsTab then
-		error("No build loaded")
+local CATALYST_NAMES = {"Flesh", "Neural", "Carapace", "Uul-Netol's", "Xoph's", "Tul's", "Esh's", "Chayula's", "Reaver", "Sibilant", "Skittering", "Adaptive"}
+
+local function formatModLines(modLines)
+	local lines = {}
+	for _, modLine in ipairs(modLines) do
+		if modLine.line then
+			table.insert(lines, modLine.line)
+		end
 	end
-	
-	local itemId = tonumber(params.item_id)
-	if not itemId then
-		error("Missing or invalid 'item_id' parameter")
-	end
-	
-	local item = build.itemsTab.items[itemId]
-	if not item then
-		error("Item " .. itemId .. " not found")
-	end
-	
-	-- Build result with all available item data
+	return lines
+end
+
+local function buildItemResult(itemId, item)
 	local result = {
 		id = itemId,
 		name = item.name,
@@ -900,9 +908,11 @@ function commands.get_item_details(params)
 		corrupted = item.corrupted or false,
 		mirrored = item.mirrored or false,
 		socketLimit = item.base and item.base.socketLimit or nil,
+		socketCount = item.itemSocketCount or 0,
+		runeCount = item.runes and #item.runes or 0,
+		catalyst = item.catalyst and CATALYST_NAMES[item.catalyst] or nil,
+		catalystQuality = item.catalystQuality or nil,
 	}
-	
-	-- Add base stats
 	if item.base then
 		result.base = {
 			type = item.base.type,
@@ -910,48 +920,90 @@ function commands.get_item_details(params)
 			socketLimit = item.base.socketLimit,
 			quality = item.base.quality,
 		}
-		
-		-- Add weapon data if applicable
-		if item.base.weapon then
-			result.base.weapon = item.base.weapon
-		end
-		
-		-- Add armour data if applicable
-		if item.base.armour then
-			result.base.armour = item.base.armour
-		end
+		if item.base.weapon then result.base.weapon = item.base.weapon end
+		if item.base.armour then result.base.armour = item.base.armour end
 	end
-	
-	-- Add requirements
 	if item.requirements then
 		result.requirements = item.requirements
 	end
-	
-	-- Add mods
-	local function formatModLines(modLines)
-		local lines = {}
-		for _, modLine in ipairs(modLines) do
-			if modLine.line then
-				table.insert(lines, modLine.line)
-			end
-		end
-		return lines
-	end
-	
 	result.implicits = formatModLines(item.implicitModLines or {})
 	result.explicits = formatModLines(item.explicitModLines or {})
 	result.enchants = formatModLines(item.enchantModLines or {})
-	result.runes = formatModLines(item.runeModLines or {})
-	
-	-- Add equipped slot info
+	result.socketed = {}
+	for _, name in ipairs(item.runes or {}) do
+		table.insert(result.socketed, name)
+	end
+	result.runeEffects = formatModLines(item.runeModLines or {})
+	-- Equipped slot
 	for slotName, slot in pairs(build.itemsTab.slots) do
 		if slot.selItemId == itemId then
 			result.equippedSlot = slotName
 			break
 		end
 	end
-	
 	return result
+end
+
+function commands.get_item_details(params)
+	if not build or not build.itemsTab then
+		error("No build loaded")
+	end
+	local itemId = tonumber(params.item_id)
+	if not itemId then
+		error("Missing or invalid 'item_id' parameter")
+	end
+	local item = build.itemsTab.items[itemId]
+	if not item then
+		error("Item " .. itemId .. " not found")
+	end
+	return buildItemResult(itemId, item)
+end
+
+function commands.dump_item_fields(params)
+	if not build or not build.itemsTab then
+		error("No build loaded")
+	end
+	local itemId = tonumber(params.item_id)
+	if not itemId then
+		error("Missing or invalid 'item_id' parameter")
+	end
+	local item = build.itemsTab.items[itemId]
+	if not item then
+		error("Item " .. itemId .. " not found")
+	end
+	local fields = {}
+	for k, v in pairs(item) do
+		local vtype = type(v)
+		if vtype == "number" or vtype == "boolean" or vtype == "string" then
+			fields[k] = v
+		elseif vtype == "table" then
+			fields[k] = "<table>"
+		else
+			fields[k] = "<" .. vtype .. ">"
+		end
+	end
+	return { fields = fields }
+end
+
+function commands.get_all_equipped_items(params)
+	if not build or not build.itemsTab then
+		error("No build loaded")
+	end
+	-- Build a set of equipped item IDs from slots
+	local equippedIds = {}
+	for _, slot in pairs(build.itemsTab.slots) do
+		if slot.selItemId and slot.selItemId ~= 0 then
+			equippedIds[slot.selItemId] = true
+		end
+	end
+	local items = {}
+	for itemId, _ in pairs(equippedIds) do
+		local item = build.itemsTab.items[itemId]
+		if item then
+			table.insert(items, buildItemResult(itemId, item))
+		end
+	end
+	return { items = items }
 end
 
 function commands.list_slots(params)
@@ -1043,6 +1095,130 @@ function commands.unequip_slot(params)
 	build.itemsTab:PopulateSlots()
 	recalc()
 	return { success = true }
+end
+
+function commands.get_item_impact(params)
+	if not build or not build.itemsTab or not build.calcsTab then
+		error("No build loaded")
+	end
+	local itemId = tonumber(params.item_id)
+	if not itemId then
+		error("Missing or invalid 'item_id' parameter")
+	end
+	local item = build.itemsTab.items[itemId]
+	if not item then
+		error("Item " .. itemId .. " not found")
+	end
+
+	-- Find the slot this item occupies
+	local equippedSlot, equippedSlotObj = nil, nil
+	for slotName, slot in pairs(build.itemsTab.slots) do
+		if slot.selItemId == itemId then
+			equippedSlot = slotName
+			equippedSlotObj = slot
+			break
+		end
+	end
+	if not equippedSlot then
+		error("Item " .. itemId .. " is not currently equipped")
+	end
+
+	local statKeys = params.stats or CURATED_STATS
+
+	-- Snapshot stats with item equipped
+	local function snapshot()
+		local output = build.calcsTab.mainOutput
+		local snap = {}
+		for _, key in ipairs(statKeys) do
+			local v = output[key]
+			if type(v) == "number" then snap[key] = v end
+		end
+		return snap
+	end
+
+	local withItem = snapshot()
+
+	-- Temporarily unequip
+	equippedSlotObj:SetSelItemId(0)
+	recalc()
+	local withoutItem = snapshot()
+
+	-- Re-equip
+	equippedSlotObj:SetSelItemId(itemId)
+	recalc()
+
+	-- Return only stats that changed
+	local delta = {}
+	local allKeys = {}
+	for k in pairs(withItem) do allKeys[k] = true end
+	for k in pairs(withoutItem) do allKeys[k] = true end
+	for k in pairs(allKeys) do
+		local a = withItem[k] or 0
+		local b = withoutItem[k] or 0
+		if a ~= b then
+			delta[k] = { with = a, without = b, diff = a - b }
+		end
+	end
+
+	return { slot = equippedSlot, itemName = item.name, delta = delta }
+end
+
+function commands.get_all_equipped_items_impact(params)
+	if not build or not build.itemsTab or not build.calcsTab then
+		error("No build loaded")
+	end
+
+	local statKeys = params and params.stats or CURATED_STATS
+
+	local function snapshot()
+		local output = build.calcsTab.mainOutput
+		local snap = {}
+		for _, key in ipairs(statKeys) do
+			local v = output[key]
+			if type(v) == "number" then snap[key] = v end
+		end
+		return snap
+	end
+
+	-- Collect equipped slots
+	local equipped = {}
+	for slotName, slot in pairs(build.itemsTab.slots) do
+		local itemId = slot.selItemId
+		if itemId and itemId ~= 0 then
+			local item = build.itemsTab.items[itemId]
+			if item then
+				table.insert(equipped, { slot = slot, slotName = slotName, itemId = itemId, itemName = item.name })
+			end
+		end
+	end
+
+	local results = {}
+	for _, entry in ipairs(equipped) do
+		local withItem = snapshot()
+
+		entry.slot:SetSelItemId(0)
+		recalc()
+		local withoutItem = snapshot()
+
+		entry.slot:SetSelItemId(entry.itemId)
+		recalc()
+
+		local delta = {}
+		local allKeys = {}
+		for k in pairs(withItem) do allKeys[k] = true end
+		for k in pairs(withoutItem) do allKeys[k] = true end
+		for k in pairs(allKeys) do
+			local a = withItem[k] or 0
+			local b = withoutItem[k] or 0
+			if a ~= b then
+				delta[k] = { with = a, without = b, diff = a - b }
+			end
+		end
+
+		table.insert(results, { slot = entry.slotName, itemName = entry.itemName, itemId = entry.itemId, delta = delta })
+	end
+
+	return { items = results }
 end
 
 function commands.delete_item(params)
@@ -1726,6 +1902,80 @@ function commands.search_item_types(params)
 	return { types = results, count = count }
 end
 
+function commands.list_config_options(params)
+	if not build or not build.calcsTab or not build.calcsTab.mainEnv then
+		error("No build loaded or calcs not yet run")
+	end
+	local mainEnv = build.calcsTab.mainEnv
+	local input = build.configTab.input
+	local configOptions = LoadModule("Modules/ConfigOptions")
+
+	local function isShown(varData)
+		-- Replicate ConfigTab's visibility logic for each gate type
+		if varData.ifCond then
+			local conds = type(varData.ifCond) == "table" and varData.ifCond or { varData.ifCond }
+			local any = false
+			for _, c in ipairs(conds) do
+				if mainEnv.conditionsUsed[c] then any = true; break end
+			end
+			if not any then return false end
+		end
+		if varData.ifFlag then
+			local flags = type(varData.ifFlag) == "table" and varData.ifFlag or { varData.ifFlag }
+			local skillModList = mainEnv.player.mainSkill.skillModList
+			local skillFlags = mainEnv.player.mainSkill.activeEffect.statSet.skillFlags
+			local any = false
+			for _, f in ipairs(flags) do
+				if skillFlags[f] or skillModList:Flag(nil, f) then any = true; break end
+				if mainEnv.minion then
+					local mml = mainEnv.minion.mainSkill.skillModList
+					local msf = mainEnv.minion.mainSkill.activeEffect.statSet.skillFlags
+					if msf[f] or mml:Flag(nil, f) then any = true; break end
+				end
+			end
+			if not any then return false end
+		end
+		if varData.ifMod then
+			local mods = type(varData.ifMod) == "table" and varData.ifMod or { varData.ifMod }
+			local any = false
+			for _, m in ipairs(mods) do
+				if mainEnv.modsUsed[m] then any = true; break end
+			end
+			if not any then return false end
+		end
+		if varData.ifSkill then
+			local skills = type(varData.ifSkill) == "table" and varData.ifSkill or { varData.ifSkill }
+			local any = false
+			for _, s in ipairs(skills) do
+				if mainEnv.skillsUsed[s] then any = true; break end
+			end
+			if not any then return false end
+		end
+		if varData.ifMinionCond then
+			local conds = type(varData.ifMinionCond) == "table" and varData.ifMinionCond or { varData.ifMinionCond }
+			local any = false
+			for _, c in ipairs(conds) do
+				if mainEnv.minionConditionsUsed[c] then any = true; break end
+			end
+			if not any then return false end
+		end
+		return true
+	end
+
+	local options = {}
+	for _, varData in ipairs(configOptions) do
+		if varData.var and varData.label and isShown(varData) then
+			table.insert(options, {
+				var = varData.var,
+				type = varData.type,
+				label = StripEscapes(varData.label),
+				value = input[varData.var],
+			})
+		end
+	end
+	return { options = options }
+end
+
 function commands.set_config(params)
 	if not build or not build.configTab then
 		error("No build loaded")
@@ -2219,6 +2469,19 @@ function commands.get_unique_item_details(params)
 	end
 	
 	error("Unique item not found: " .. name)
+end
+
+function commands.check_flag(params)
+	if not build or not build.calcsTab or not build.calcsTab.mainEnv then
+		error("No build loaded or calcs not yet run")
+	end
+	local flag = params and params.flag
+	if not flag then
+		error("Missing 'flag' parameter")
+	end
+	local modDB = build.calcsTab.mainEnv.modDB
+	local value = modDB:Flag(nil, flag) and true or false
+	return { flag = flag, value = value }
 end
 
 function commands.shutdown(params)
