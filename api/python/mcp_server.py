@@ -439,6 +439,31 @@ def get_stats_list(keys: list[str]) -> str:
 
 
 @mcp.tool()
+def get_minion_stats(keys: list[str] | None = None) -> str:
+    """Get calculated stats for the minion of the current main skill.
+
+    Returns damage, survivability, and defensive stats for the minion associated
+    with the active skill (e.g. Raise Skeleton, Summon Wolf). Returns a message
+    if the current main skill has no minion.
+
+    Args:
+        keys: Optional list of specific stat keys to retrieve. If omitted, returns
+            curated minion stats. Common keys: CombinedDPS, TotalDPS, TotalDot,
+            WithDotDPS, BleedDPS, IgniteDPS, PoisonDPS, DecayDPS, TotalDotDPS,
+            Life, EnergyShield, LifeRegenRecovery, FireResist, ColdResist,
+            LightningResist, ChaosResist, Armour, Evasion, CritChance, CritMultiplier
+    """
+    params = {}
+    if keys:
+        params["keys"] = keys
+    result = call("get_minion_stats", params if params else None)
+    if not result.get("has_minion"):
+        return "No minion associated with the current main skill."
+    result.pop("has_minion", None)
+    return format_result(result)
+
+
+@mcp.tool()
 def search_modifiers(query: str, mod_type: str = "Item", max_results: int = 30) -> str:
     """Search for modifier groups by name, affix, or effect text.
     

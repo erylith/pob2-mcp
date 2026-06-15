@@ -611,6 +611,26 @@ local CURATED_STATS = {
 	"Devotion", "Tribute",
 }
 
+local CURATED_MINION_STATS = {
+	-- DPS
+	"CombinedDPS", "TotalDPS", "TotalDot", "WithDotDPS",
+	"AverageDamage", "Speed", "HitSpeed",
+	"BleedDPS", "WithBleedDPS",
+	"IgniteDPS", "WithIgniteDPS",
+	"PoisonDPS", "PoisonDamage", "WithPoisonDPS",
+	"DecayDPS", "TotalDotDPS",
+	"ImpaleDPS", "WithImpaleDPS",
+	"CullingDPS", "ReservationDPS",
+	-- Survivability
+	"Life", "LifeRegenRecovery", "LifeLeechGainRate",
+	"EnergyShield", "EnergyShieldRegenRecovery", "EnergyShieldLeechGainRate",
+	-- Defenses
+	"Armour", "Evasion",
+	"FireResist", "ColdResist", "LightningResist", "ChaosResist",
+	-- Combat
+	"CritChance", "CritMultiplier",
+}
+
 -- ============================================================================
 -- Path validation helper
 -- ============================================================================
@@ -1082,7 +1102,6 @@ function commands.add_skill(params)
 	if not skillText then
 		error("Missing 'skill_text' parameter")
 	end
-	-- Parse the skill text similar to PasteSocketGroup
 	local newGroup = { label = "", enabled = true, gemList = {} }
 	local label = skillText:match("Label: (%C+)")
 	if label then newGroup.label = label end
@@ -1091,7 +1110,7 @@ function commands.add_skill(params)
 	for nameSpec, level, quality, state, count in
 		skillText:gmatch("([ %a']+) (%d+)/(%d+) ?(%a*) ?(%d*)") do
 		table.insert(newGroup.gemList, {
-			nameSpec = nameSpec:match("^%s*(.-)%s*$"), -- trim
+			nameSpec = nameSpec:match("^%s*(.-)%s*$"),
 			level = tonumber(level) or 20,
 			quality = tonumber(quality) or 0,
 			enabled = state ~= "DISABLED",
@@ -1102,6 +1121,20 @@ function commands.add_skill(params)
 	end
 	if #newGroup.gemList == 0 then
 		error("No gems found in skill text. Expected format: 'GemName level/quality [count]'")
+	end
+	-- Resolve gemId, skillId, and gemData for each gem via the same path the UI uses.
+	-- Without this, gems with no gemData are silently skipped by the calc engine,
+	-- and minion skills never get their minionData populated.
+	build.skillsTab:ProcessSocketGroup(newGroup)
+	-- Surface any gem name resolution errors
+	local gemErrors = {}
+	for _, gem in ipairs(newGroup.gemList) do
+		if gem.errMsg then
+			table.insert(gemErrors, gem.nameSpec .. ": " .. gem.errMsg)
+		end
+	end
+	if #gemErrors > 0 then
+		error("Gem resolution failed:\n" .. table.concat(gemErrors, "\n"))
 	end
 	table.insert(build.skillsTab.socketGroupList, newGroup)
 	build.skillsTab:AddUndoState()
@@ -1305,6 +1338,30 @@ function commands.get_stats_list(params)
 	}
 end
 
+function commands.get_minion_stats(params)
+	if not build or not build.calcsTab then
+		error("No build loaded")
+	end
+	local output = build.calcsTab.mainOutput
+	if not output then
+		error("No calculation output available")
+	end
+	local minionOutput = output.Minion
+	if not minionOutput then
+		return { has_minion = false }
+	end
+
+	local result = { has_minion = true }
+	local requestedKeys = params and params.keys or CURATED_MINION_STATS
+	for _, key in ipairs(requestedKeys) do
+		local val = minionOutput[key]
+		if val ~= nil and (type(val) == "number" or type(val) == "string" or type(val) == "boolean") then
+			result[key] = val
+		end
+	end
+	return result
+end
+
 -- ============================================================================
 -- Modifier tier query commands
 -- ============================================================================
@@ -1462,10 +1519,20 @@ function commands.get_modifiers_for_item_type(params)
 	
 	for modId, modData in pairs(modSource) do
 		-- Check if this modifier can roll on the item type
+		-- Supports partial matching: "sword" matches "sword", "two_hand_sword", etc.
 		local canRoll = false
 		if modData.weightKey and modData.weightVal then
 			for i, key in ipairs(modData.weightKey) do
-				if key:lower() == itemType or key:lower():find(itemType, 1, true) then
+				local keyLower = key:lower()
+				-- Exact match
+				if keyLower == itemType then
+					local weight = modData.weightVal[i]
+					if weight and weight > 0 then
+						canRoll = true
+						break
+					end
+				-- Partial match: key contains the search term or vice versa
+				elseif keyLower:find(itemType, 1, true) or itemType:find(keyLower, 1, true) then
 					local weight = modData.weightVal[i]
 					if weight and weight > 0 then
 						canRoll = true
@@ -1543,6 +1610,120 @@ function commands.get_modifier_types(params)
 	table.sort(types)
 	
 	return { types = types, count = #types }
+end
+
+function commands.get_item_modifier_tags(params)
+	if not build or not build.data or not build.data.itemMods then
+		error("No build loaded")
+	end
+	
+	local modType = params.mod_type or "Item"
+	local modSource = build.data.itemMods[modType]
+	
+	if not modSource then
+		error("Invalid mod_type: " .. modType)
+	end
+	
+	-- Collect all unique weight keys
+	local tags = {}
+	local seenTags = {}
+	
+	for _, modData in pairs(modSource) do
+		if modData.weightKey then
+			for _, key in ipairs(modData.weightKey) do
+				if key ~= "default" and not seenTags[key] then
+					seenTags[key] = true
+					table.insert(tags, key)
+				end
+			end
+		end
+	end
+	
+	-- Sort alphabetically
+	table.sort(tags)
+	
+	return { tags = tags, count = #tags, mod_type = modType }
+end
+
+function commands.search_item_types(params)
+	if not build or not build.data then
+		error("No build loaded")
+	end
+	
+	local query = (params.query or ""):lower()
+	local maxResults = params.max_results or 50
+	
+	if query == "" then
+		error("Missing 'query' parameter")
+	end
+	
+	local results = {}
+	local count = 0
+	
+	-- Search through itemBases for matching types
+	for baseName, baseData in pairs(build.data.itemBases) do
+		local match = false
+		
+		-- Check if base name matches
+		if baseName:lower():find(query, 1, true) then
+			match = true
+		end
+		
+		-- Check if type matches
+		if not match and baseData.type and baseData.type:lower():find(query, 1, true) then
+			match = true
+		end
+		
+		-- Check if subType matches
+		if not match and baseData.subType and baseData.subType:lower():find(query, 1, true) then
+			match = true
+		end
+		
+		if match then
+			local typeName = baseData.type
+			if baseData.subType then
+				typeName = typeName .. ": " .. baseData.subType
+			end
+			
+			-- Check if we already have this type
+			local exists = false
+			for _, existing in ipairs(results) do
+				if existing.type == typeName then
+					exists = true
+					break
+				end
+			end
+			
+			if not exists then
+				-- Collect tags for this item type
+				local tags = {}
+				if baseData.tags then
+					for tag, _ in pairs(baseData.tags) do
+						table.insert(tags, tag)
+					end
+				end
+				
+				table.insert(results, {
+					type = typeName,
+					base_name = baseName,
+					example_base = baseName,
+					tags = tags
+				})
+				
+				count = count + 1
+				if count >= maxResults then
+					break
+				end
+			end
+		end
+	end
+	
+	-- Sort by type name
+	table.sort(results, function(a, b)
+		return a.type < b.type
+	end)
+	
+	return { types = results, count = count }
 end
 
 function commands.set_config(params)
