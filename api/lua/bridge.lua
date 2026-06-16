@@ -1192,23 +1192,24 @@ function commands.get_all_equipped_items_impact(params)
 		end
 	end
 
+	-- Snapshot once with everything equipped (already calculated, no recalc needed)
+	local baseSnap = snapshot()
+
 	local results = {}
 	for _, entry in ipairs(equipped) do
-		local withItem = snapshot()
-
 		entry.slot:SetSelItemId(0)
 		recalc()
 		local withoutItem = snapshot()
 
+		-- Reequip without recalc — next iteration's unequip + recalc will start clean
 		entry.slot:SetSelItemId(entry.itemId)
-		recalc()
 
 		local delta = {}
 		local allKeys = {}
-		for k in pairs(withItem) do allKeys[k] = true end
+		for k in pairs(baseSnap) do allKeys[k] = true end
 		for k in pairs(withoutItem) do allKeys[k] = true end
 		for k in pairs(allKeys) do
-			local a = withItem[k] or 0
+			local a = baseSnap[k] or 0
 			local b = withoutItem[k] or 0
 			if a ~= b then
 				delta[k] = { with = a, without = b, diff = a - b }
@@ -1217,6 +1218,9 @@ function commands.get_all_equipped_items_impact(params)
 
 		table.insert(results, { slot = entry.slotName, itemName = entry.itemName, itemId = entry.itemId, delta = delta })
 	end
+
+	-- Single recalc to restore correct state
+	recalc()
 
 	return { items = results }
 end
