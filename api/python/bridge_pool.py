@@ -180,6 +180,28 @@ class LuaBridgePool:
 
         return bridge.send_command(command, params)
 
+    def call_any(
+        self,
+        command: str,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Route a command to any available bridge, bootstrapping one if needed.
+
+        Use for commands that don't require a loaded build (e.g. list_builds,
+        search_base_items). If no build is loaded, a minimal new-build bridge
+        is started automatically.
+        """
+        with self._lock:
+            bridge = self._builds.get(self._lru[-1]) if self._lru else None
+
+        if bridge is None:
+            logger.info("No bridge available — bootstrapping a new-build bridge")
+            self.load_build(name="__bootstrap__", new=True)
+            with self._lock:
+                bridge = self._builds["__bootstrap__"]
+
+        return bridge.send_command(command, params)
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------

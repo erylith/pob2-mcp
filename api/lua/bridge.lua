@@ -855,6 +855,149 @@ function commands.get_node_info(params)
 	}
 end
 
+function commands.get_node_impact(params)
+	if not build or not build.spec or not build.calcsTab then
+		error("No build loaded")
+	end
+	local nodeId = tonumber(params.node_id)
+	if not nodeId then
+		error("Missing or invalid 'node_id' parameter")
+	end
+	local node = build.spec.nodes[nodeId]
+	if not node then
+		error("Node " .. nodeId .. " not found")
+	end
+
+	local statKeys = params.stats or CURATED_STATS
+	local function snapshot()
+		local output = build.calcsTab.mainOutput
+		local snap = {}
+		for _, key in ipairs(statKeys) do
+			local v = output[key]
+			if type(v) == "number" then snap[key] = v end
+		end
+		return snap
+	end
+
+	local wasAlloc = node.alloc or false
+	local snapBefore = snapshot()
+
+	if wasAlloc then
+		build.spec:DeallocNode(node)
+	else
+		build.spec:AllocNode(node)
+	end
+	recalc()
+	local snapAfter = snapshot()
+
+	-- Restore without a second recalc — caller still gets correct state after next op
+	if wasAlloc then
+		build.spec:AllocNode(node)
+	else
+		build.spec:DeallocNode(node)
+	end
+	recalc()
+
+	-- "with" = allocated state, "without" = unallocated state
+	local snapWith    = wasAlloc and snapBefore or snapAfter
+	local snapWithout = wasAlloc and snapAfter  or snapBefore
+
+	local delta = {}
+	local allKeys = {}
+	for k in pairs(snapWith)    do allKeys[k] = true end
+	for k in pairs(snapWithout) do allKeys[k] = true end
+	for k in pairs(allKeys) do
+		local a = snapWith[k]    or 0
+		local b = snapWithout[k] or 0
+		if a ~= b then
+			delta[k] = { with = a, without = b, diff = a - b }
+		end
+	end
+
+	return {
+		nodeId = nodeId,
+		name = node.dn or node.name,
+		type = node.type,
+		wasAllocated = wasAlloc,
+		delta = delta,
+	}
+end
+
+function commands.get_nodes_impact(params)
+	if not build or not build.spec or not build.calcsTab then
+		error("No build loaded")
+	end
+	if not params or not params.node_ids or #params.node_ids == 0 then
+		error("Missing 'node_ids' parameter")
+	end
+
+	local statKeys = params.stats or CURATED_STATS
+	local function snapshot()
+		local output = build.calcsTab.mainOutput
+		local snap = {}
+		for _, key in ipairs(statKeys) do
+			local v = output[key]
+			if type(v) == "number" then snap[key] = v end
+		end
+		return snap
+	end
+
+	-- Baseline with current allocation (no recalc needed)
+	local baseSnap = snapshot()
+
+	local results = {}
+	for _, rawId in ipairs(params.node_ids) do
+		local nodeId = tonumber(rawId)
+		local node = nodeId and build.spec.nodes[nodeId]
+		if node then
+			local wasAlloc = node.alloc or false
+
+			if wasAlloc then
+				build.spec:DeallocNode(node)
+			else
+				build.spec:AllocNode(node)
+			end
+			recalc()
+			local snapAfter = snapshot()
+
+			-- Restore without recalc; next iteration recalcs on its own toggle
+			if wasAlloc then
+				build.spec:AllocNode(node)
+			else
+				build.spec:DeallocNode(node)
+			end
+
+			local snapWith    = wasAlloc and baseSnap  or snapAfter
+			local snapWithout = wasAlloc and snapAfter or baseSnap
+
+			local delta = {}
+			local allKeys = {}
+			for k in pairs(snapWith)    do allKeys[k] = true end
+			for k in pairs(snapWithout) do allKeys[k] = true end
+			for k in pairs(allKeys) do
+				local a = snapWith[k]    or 0
+				local b = snapWithout[k] or 0
+				if a ~= b then
+					delta[k] = { with = a, without = b, diff = a - b }
+				end
+			end
+
+			table.insert(results, {
+				nodeId = nodeId,
+				name = node.dn or node.name,
+				type = node.type,
+				wasAllocated = wasAlloc,
+				delta = delta,
+			})
+		end
+	end
+
+	-- Single recalc to restore correct state
+	recalc()
+
+	return { nodes = results }
+end
+
 function commands.list_items(params)
 	if not build or not build.itemsTab then
 		error("No build loaded")

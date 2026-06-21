@@ -69,6 +69,11 @@ def call(command: str, params: dict | None = None) -> dict:
     return get_pool().call(command, params)
 
 
+def call_any(command: str, params: dict | None = None) -> dict:
+    """Call a bridge command that doesn't require a loaded build."""
+    return get_pool().call_any(command, params)
+
+
 def format_result(result: dict) -> str:
     """Format a result dict as readable JSON."""
     return json.dumps(result, indent=2, default=str)
@@ -180,6 +185,47 @@ def get_node_info(node_id: int) -> str:
     """
     result = call("get_node_info", {"node_id": node_id})
     return format_result(result)
+
+
+@mcp.tool()
+def get_node_impact(node_id: int, stats: list[str] | None = None) -> str:
+    """Show the stat impact of allocating or deallocating a single passive node.
+
+    Toggles the node, recalcs, snapshots the delta, then restores — all in one
+    call. Works for both allocated nodes (shows what you'd lose) and unallocated
+    nodes (shows what you'd gain). Only changed stats are returned.
+
+    Args:
+        node_id: The numeric ID of the passive tree node
+        stats:   Optional list of specific stat keys. Defaults to the curated set.
+    """
+    params: dict = {"node_id": node_id}
+    if stats:
+        params["stats"] = stats
+    result = call("get_node_impact", params)
+    return format_result(result)
+
+
+@mcp.tool()
+def get_nodes_impact(node_ids: list[int], stats: list[str] | None = None) -> str:
+    """Show the stat impact of toggling multiple passive nodes, in one call.
+
+    Evaluates each node independently (all others at their current state) using
+    N+1 recalcs instead of 2N — much faster than calling get_node_impact
+    repeatedly. Use this when comparing several candidate nodes at once.
+
+    Args:
+        node_ids: List of passive node IDs to evaluate
+        stats:    Optional list of specific stat keys. Defaults to the curated set.
+    """
+    params: dict = {"node_ids": node_ids}
+    if stats:
+        params["stats"] = stats
+    result = call("get_nodes_impact", params)
+    nodes = result.get("nodes", [])
+    if not nodes:
+        return "No results."
+    return format_result(nodes)
 
 
 # ============================================================================
@@ -297,7 +343,7 @@ def search_base_items(query: str, item_type: str | None = None, max_results: int
     params = {"query": query, "max_results": max_results}
     if item_type:
         params["type"] = item_type
-    result = call("search_base_items", params)
+    result = call_any("search_base_items", params)
     items = result.get("items", [])
     if not items:
         return f"No base items found matching '{query}'."
@@ -307,7 +353,7 @@ def search_base_items(query: str, item_type: str | None = None, max_results: int
 @mcp.tool()
 def get_base_item_types() -> str:
     """List all available item base type categories (e.g., Helmet, Staff, Amulet)."""
-    result = call("get_base_item_types")
+    result = call_any("get_base_item_types")
     types = result.get("types", [])
     if not types:
         return "No item types found."
@@ -321,7 +367,7 @@ def get_base_item_details(name: str) -> str:
     Args:
         name: The exact name of the base item (e.g., "Rusted Greathelm")
     """
-    result = call("get_base_item_details", {"name": name})
+    result = call_any("get_base_item_details", {"name": name})
     return format_result(result)
 
 
@@ -337,7 +383,7 @@ def search_unique_items(query: str, item_type: str | None = None, max_results: i
     params = {"query": query, "max_results": max_results}
     if item_type:
         params["type"] = item_type
-    result = call("search_unique_items", params)
+    result = call_any("search_unique_items", params)
     uniques = result.get("uniques", [])
     if not uniques:
         return f"No unique items found matching '{query}'."
@@ -351,7 +397,7 @@ def get_unique_item_details(name: str) -> str:
     Args:
         name: The exact name of the unique item (e.g., "Black Sun Crest")
     """
-    result = call("get_unique_item_details", {"name": name})
+    result = call_any("get_unique_item_details", {"name": name})
     return format_result(result)
 
 
@@ -573,7 +619,7 @@ def get_modifier_tiers(group: str, mod_type: str = "Item") -> str:
     - Required item level
     - Which item types can roll it
     """
-    result = call("get_modifier_tiers", {"group": group, "mod_type": mod_type})
+    result = call_any("get_modifier_tiers", {"group": group, "mod_type": mod_type})
     tiers = result.get("tiers", [])
     if not tiers:
         return f"No tiers found for group '{group}' in {mod_type}."
@@ -615,7 +661,7 @@ def get_modifiers_for_item_type(item_type: str, mod_type: str = "Item",
     if affix_type:
         params["affix_type"] = affix_type
     
-    result = call("get_modifiers_for_item_type", params)
+    result = call_any("get_modifiers_for_item_type", params)
     modifiers = result.get("modifiers", [])
     if not modifiers:
         filter_text = f" {affix_type.lower()}" if affix_type else ""
@@ -640,7 +686,7 @@ def get_modifier_types() -> str:
     Use these type names with search_modifiers, get_modifier_tiers, and
     get_modifiers_for_item_type functions.
     """
-    result = call("get_modifier_types")
+    result = call_any("get_modifier_types")
     types = result.get("types", [])
     if not types:
         return "No modifier types found."
@@ -664,7 +710,7 @@ def get_item_modifier_tags(mod_type: str = "Item") -> str:
     - Accessories: ring, amulet, belt, quiver
     - Special: str_armour, dex_armour, int_armour (attribute-based armour)
     """
-    result = call("get_item_modifier_tags", {"mod_type": mod_type})
+    result = call_any("get_item_modifier_tags", {"mod_type": mod_type})
     tags = result.get("tags", [])
     if not tags:
         return f"No modifier tags found for {mod_type}."
@@ -688,7 +734,7 @@ def search_item_types(query: str, max_results: int = 50) -> str:
     - "Two Handed Sword" with tags
     etc.
     """
-    result = call("search_item_types", {"query": query, "max_results": max_results})
+    result = call_any("search_item_types", {"query": query, "max_results": max_results})
     types = result.get("types", [])
     if not types:
         return f"No item types found matching '{query}'."
@@ -792,7 +838,7 @@ def list_builds(sub_path: str = "") -> str:
     Args:
         sub_path: Optional subdirectory within builds folder to list
     """
-    result = call("list_builds", {"sub_path": sub_path})
+    result = call_any("list_builds", {"sub_path": sub_path})
     builds = result.get("builds", [])
     folders = result.get("folders", [])
     
@@ -918,7 +964,7 @@ def delete_build_file(path: str) -> str:
     Args:
         path: Full path to the build .xml file to delete
     """
-    call("delete_build_file", {"path": path})
+    call_any("delete_build_file", {"path": path})
     return f"Build file deleted: {path}"
 
 
@@ -930,7 +976,7 @@ def create_builds_folder(name: str, sub_path: str = "") -> str:
         name: Name for the new folder
         sub_path: Optional parent subdirectory within builds folder
     """
-    result = call("create_folder", {"name": name, "sub_path": sub_path})
+    result = call_any("create_folder", {"name": name, "sub_path": sub_path})
     return f"Folder created: {result.get('path', 'Unknown')}"
 
 
@@ -942,7 +988,7 @@ def rename_build_file(old_path: str, new_name: str) -> str:
         old_path: Full path to the current build file
         new_name: New name for the file (without .xml extension)
     """
-    result = call("rename_build_file", {"old_path": old_path, "new_name": new_name})
+    result = call_any("rename_build_file", {"old_path": old_path, "new_name": new_name})
     return f"Build renamed to: {result.get('new_path', 'Unknown')}"
 
 
