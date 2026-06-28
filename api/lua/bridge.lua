@@ -719,6 +719,26 @@ function commands.get_build_info(params)
 		viewMode = build.viewMode,
 		buildName = build.buildName,
 	}
+
+	-- Detect minion build: mainOutput.Minion exists with non-zero DPS
+	if build.calcsTab and build.calcsTab.mainOutput then
+		local minionOut = build.calcsTab.mainOutput.Minion
+		info.isMinionBuild = type(minionOut) == "table" and (minionOut.TotalDPS or 0) > 0
+	else
+		info.isMinionBuild = false
+	end
+
+	-- Main skill name (best-effort)
+	pcall(function()
+		local env = build.calcsTab and build.calcsTab.mainEnv
+		if env and env.player and env.player.mainSkill then
+			local ge = env.player.mainSkill.activeEffect and env.player.mainSkill.activeEffect.grantedEffect
+			if ge then
+				info.mainSkillName = ge.name
+			end
+		end
+	end)
+
 	return info
 end
 
@@ -1181,20 +1201,31 @@ function commands.add_item(params)
 	if not item.base then
 		error("Failed to parse item: unrecognized base type")
 	end
+	if #item.runes > 0 then
+		item:UpdateRunes()
+	end
 	item:BuildModList()
-	build.itemsTab:AddItem(item, params.slot == nil)
+	build.itemsTab:AddItem(item, false)   -- add without auto-equip; we handle slot below
 	build.itemsTab:PopulateSlots()
 	build.itemsTab:AddUndoState()
-	-- Optionally equip to a specific slot
-	if params.slot then
-		local slot = build.itemsTab.slots[params.slot]
+
+	-- Determine target slot: explicit > force_slot detection > none (inventory only)
+	local targetSlotName = params.slot
+	if not targetSlotName and params.force_slot then
+		local candidates = slotsForItemType(item)
+		targetSlotName = candidates[1]
+	end
+
+	if targetSlotName then
+		local slot = build.itemsTab.slots[targetSlotName]
 		if slot then
 			slot:SetSelItemId(item.id)
 			build.itemsTab:PopulateSlots()
 		end
 	end
+
 	recalc()
-	return { success = true, item_id = item.id }
+	return { success = true, item_id = item.id, slot = targetSlotName }
 end
 
 function commands.equip_item(params)
@@ -1529,6 +1560,18 @@ function commands.get_output(params)
 			end
 		end
 	end
+
+	-- Include Minion_* stats when a minion sub-environment exists
+	if type(output.Minion) == "table" then
+		local minionStats = (params and params.minion_stats) or CURATED_MINION_STATS
+		for _, key in ipairs(minionStats) do
+			local val = output.Minion[key]
+			if type(val) == "number" then
+				result["Minion_" .. key] = val
+			end
+		end
+	end
+
 	-- Include SkillDPS if available
 	if output.SkillDPS and type(output.SkillDPS) == "table" then
 		local skillDPS = {}
@@ -2229,7 +2272,19 @@ function commands.load_build_file(params)
 	if not path then
 		error("Missing 'path' parameter")
 	end
-	
+
+	-- If the caller passed a relative path (no leading / or drive letter on Windows),
+	-- resolve it against the known builds directory so validateBuildPath succeeds.
+	local isAbsolute = path:sub(1, 1) == "/" or (isWindows and path:match("^[A-Za-z]:"))
+	if not isAbsolute then
+		local buildsPath = mainObject.main.buildPath or ""
+		-- Ensure builds path ends with a separator
+		if buildsPath:sub(-1) ~= "/" and buildsPath:sub(-1) ~= "\\" then
+			buildsPath = buildsPath .. (isWindows and "\\" or "/")
+		end
+		path = buildsPath .. path
+	end
+
 	-- Validate path and get absolute path
 	local absPath = validateBuildPath(path, "load")
 	
@@ -2252,37 +2307,35 @@ function commands.save_build(params)
 	if not build then
 		error("No build loaded")
 	end
-	
-	if not build.buildFileName then
-		error("Build has no file name, use save_build_as instead")
+
+	if not build.dbFileName then
+		error("Build has no file name — use save_build_as instead")
 	end
-	
-	build:SaveDBFile(build.buildFileName)
-	return { success = true }
+
+	build:SaveDBFile()
+	return { success = true, path = build.dbFileName }
 end
 
 function commands.save_build_as(params)
 	if not build then
 		error("No build loaded")
 	end
-	
+
 	local name = params.name
 	if not name then
 		error("Missing 'name' parameter")
 	end
-	
+
 	local subPath = params.sub_path or ""
-	local fileName = name .. ".xml"
-	local fullPath = mainObject.main.buildPath .. subPath .. fileName
-	
-	-- Ensure directory exists
-	local dirPath = mainObject.main.buildPath .. subPath
-	MakeDir(dirPath)
-	
-	-- Set the build filename and save
-	build.buildFileName = fileName
-	build:SaveDBFile(fullPath)
-	
+	local fullPath = mainObject.main.buildPath .. subPath .. name .. ".xml"
+
+	-- Ensure the target directory exists
+	MakeDir(mainObject.main.buildPath .. subPath)
+
+	-- SaveDBFile() uses self.dbFileName — point it at our new path
+	build.dbFileName = fullPath
+	build:SaveDBFile()
+
 	return { success = true, path = fullPath }
 end
 
@@ -2629,6 +2682,123 @@ function commands.check_flag(params)
 	local modDB = build.calcsTab.mainEnv.modDB
 	local value = modDB:Flag(nil, flag) and true or false
 	return { flag = flag, value = value }
+end
+
+-- Determine which slot(s) an item type can go into (ordered preference).
+local function slotsForItemType(item)
+	local t = item.base and item.base.type or item.type or ""
+	if t == "Helmet"      then return { "Helmet" } end
+	if t == "Body Armour" then return { "Body Armour" } end
+	if t == "Gloves"      then return { "Gloves" } end
+	if t == "Boots"       then return { "Boots" } end
+	if t == "Amulet"      then return { "Amulet" } end
+	if t == "Belt"        then return { "Belt" } end
+	if t == "Ring"        then return { "Ring 1", "Ring 2", "Ring 3" } end
+	if t == "Quiver"      then return { "Weapon 2" } end
+	if t == "Flask"       then return { "Flask 1", "Flask 2", "Flask 3", "Flask 4", "Flask 5" } end
+	if t == "Charm"       then return { "Charm 1", "Charm 2", "Charm 3" } end
+	-- Weapons: shields also land in Weapon 2
+	if item.base and item.base.weapon then return { "Weapon 1", "Weapon 2" } end
+	if t == "Shield" then return { "Weapon 2" } end
+	-- Transcendent limb slots (PoE2 body parts)
+	if t == "Arm" then return { "Arm 1", "Arm 2" } end
+	if t == "Leg" then return { "Leg 1", "Leg 2" } end
+	return {}
+end
+
+function commands.simulate_item(params)
+	if not build or not build.itemsTab or not build.calcsTab then
+		error("No build loaded")
+	end
+	local itemRaw = params and params.item_raw
+	if not itemRaw then
+		error("Missing 'item_raw' parameter")
+	end
+	local statKeys = params and params.stats or CURATED_STATS
+
+	-- 1. Parse item
+	local item = new("Item", itemRaw)
+	if not item.base then
+		error("Failed to parse item: unrecognized base type")
+	end
+	-- Apply socketed rune/idol mods before BuildModList so they are included
+	-- in the calc. new("Item",...) calls BuildModList internally but without
+	-- rune mod lines; UpdateRunes() populates them from item.runes.
+	if #item.runes > 0 then
+		item:UpdateRunes()
+	end
+	item:BuildModList()
+
+	-- 2. Find target slot (use explicit hint, or first valid slot for item type)
+	local targetSlotName = params and params.slot
+	if not targetSlotName then
+		local candidates = slotsForItemType(item)
+		if #candidates == 0 then
+			error("Cannot determine slot for item type: " .. (item.base and item.base.type or "unknown"))
+		end
+		targetSlotName = candidates[1]
+	end
+	local targetSlot = build.itemsTab.slots[targetSlotName]
+	if not targetSlot then
+		error("Slot not found: " .. targetSlotName)
+	end
+
+	-- Helper: read current calc output into a flat table (player + minion stats)
+	local function snapNow()
+		local output = build.calcsTab.mainOutput
+		local snap = {}
+		for _, key in ipairs(statKeys) do
+			local v = output[key]
+			if type(v) == "number" then snap[key] = v end
+		end
+		-- Capture minion stats with the same Minion_ prefix used by get_output
+		if type(output.Minion) == "table" then
+			for _, key in ipairs(CURATED_MINION_STATS) do
+				local v = output.Minion[key]
+				if type(v) == "number" then snap["Minion_" .. key] = v end
+			end
+		end
+		return snap
+	end
+
+	-- 3. Snapshot state before
+	local prevItemId = targetSlot.selItemId or 0
+	local snapBefore = snapNow()
+
+	-- 4. Add item to the item list (no auto-equip) and force it into the slot
+	build.itemsTab:AddItem(item, false)
+	targetSlot:SetSelItemId(item.id)
+	build.itemsTab:PopulateSlots()
+	recalc()
+	local snapAfter = snapNow()
+
+	-- 5. Restore previous slot selection and remove the temporary item
+	targetSlot:SetSelItemId(prevItemId)
+	build.itemsTab.items[item.id] = nil
+	build.itemsTab:PopulateSlots()
+	recalc()
+
+	-- 6. Build delta (after - before)
+	local allKeys = {}
+	for k in pairs(snapBefore) do allKeys[k] = true end
+	for k in pairs(snapAfter)  do allKeys[k] = true end
+
+	local delta = {}
+	for k in pairs(allKeys) do
+		local a = snapAfter[k] or 0
+		local b = snapBefore[k] or 0
+		if a ~= b then
+			delta[k] = { before = b, after = a, diff = a - b }
+		end
+	end
+
+	return {
+		slot     = targetSlotName,
+		itemType = item.base and item.base.type or item.type or "",
+		before   = snapBefore,
+		after    = snapAfter,
+		delta    = delta,
+	}
 end
 
 function commands.shutdown(params)

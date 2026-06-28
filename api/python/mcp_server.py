@@ -28,31 +28,31 @@ mcp = FastMCP(
 _pool: LuaBridgePool | None = None
 
 class ChatGPTAuthMiddleware:
-    def __init__(self, inner_app, token: str):
+    def __init__(self, inner_app, token: str, exempt_paths: frozenset[str] = frozenset()):
         self.inner_app = inner_app
         self.expected_auth = f"Bearer {token}"
+        self.exempt_paths = exempt_paths
 
     async def __call__(self, scope, receive, send):
-        # Only intercept standard HTTP requests (skip lifespan or websocket scopes)
         if scope["type"] == "http":
-            headers = dict(scope.get("headers", []))
-            # ASGI headers are stored as raw bytes, so look up b"authorization"
-            auth_header = headers.get(b"authorization", b"").decode("utf-8")
-            
-            if auth_header != self.expected_auth:
-                # Instantly slam the door with a 401 Unauthorized
-                await send({
-                    "type": "http.response.start",
-                    "status": 401,
-                    "headers": [(b"content-type", b"application/json")],
-                })
-                await send({
-                    "type": "http.response.body",
-                    "body": b'{"detail": "Unauthorized: Missing or invalid token."}',
-                })
-                return
-                
-        # Valid token (or non-HTTP payload). Hand execution off to FastMCP.
+            path = scope.get("path", "")
+            if path not in self.exempt_paths:
+                headers = dict(scope.get("headers", []))
+                auth_header = headers.get(b"authorization", b"").decode("utf-8")
+                if auth_header != self.expected_auth:
+                    await send({
+                        "type": "http.response.start",
+                        "status": 401,
+                        "headers": [
+                            (b"content-type", b"application/json"),
+                            (b"www-authenticate", b'Bearer realm="pob-poe2"'),
+                        ],
+                    })
+                    await send({
+                        "type": "http.response.body",
+                        "body": b'{"detail": "Unauthorized: Missing or invalid token."}',
+                    })
+                    return
         await self.inner_app(scope, receive, send)
 
 def get_pool() -> LuaBridgePool:
@@ -399,6 +399,39 @@ def get_unique_item_details(name: str) -> str:
     """
     result = call_any("get_unique_item_details", {"name": name})
     return format_result(result)
+
+
+@mcp.tool()
+def save_build() -> str:
+    """Save the current build back to its original XML file.
+
+    Persists all changes (equipped items, skills, passive tree, config, etc.)
+    to the build's .xml file so they survive beyond this API session and can
+    be opened directly in Path of Building.
+
+    Raises an error if the build was loaded from raw XML text rather than a
+    file (use save_build_as in that case).
+    """
+    call("save_build")
+    return "Build saved successfully."
+
+
+@mcp.tool()
+def save_build_as(name: str, sub_path: str = "") -> str:
+    """Save the current build to a new XML file under a chosen name.
+
+    Creates (or overwrites) a .xml file in the PoB builds directory, leaving
+    the original file untouched. Useful for saving a modified version without
+    clobbering the source build.
+
+    Args:
+        name: New build name used as the filename (without .xml extension).
+              Example: "Bonk Warrior MK2"
+        sub_path: Optional sub-folder within the builds directory.
+                  Example: "Characters/" to save inside a Characters sub-folder.
+    """
+    result = call("save_build_as", {"name": name, "sub_path": sub_path})
+    return f"Build saved as '{name}' → {result.get('path', '?')}"
 
 
 @mcp.tool()
@@ -993,37 +1026,41 @@ def rename_build_file(old_path: str, new_name: str) -> str:
 
 
 def run_server():
-    """Run the MCP server with configurable transport (stdio or HTTP streaming)."""
+    """Run the MCP + REST unified server."""
+    import os
+
     parser = argparse.ArgumentParser(
-        description="Path of Building PoE2 MCP Server",
+        description="Path of Building PoE2 — unified MCP + REST server",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Transport modes:
-stdio          - Standard input/output mode (default, for Claude Desktop)
-sse            - HTTP streaming with Server-Sent Events
+  streamable-http  Unified server: MCP at /mcp, REST at /api (default)
+  sse              Legacy SSE transport (MCP only, no REST)
+  stdio            Standard I/O for local Claude Desktop installs (no REST)
 
 Examples:
-%(prog)s                          # Run in stdio mode (default)
-%(prog)s --transport sse          # Run HTTP streaming on default port
-%(prog)s --transport sse --port 8080 --host 0.0.0.0
+  %(prog)s                                          # streamable-http on default port
+  %(prog)s --host 0.0.0.0 --port 8080              # bind all interfaces
+  %(prog)s --api-secret <token>                     # enable bearer-token auth
+  %(prog)s --transport stdio                        # local Claude Desktop
         """,
     )
     parser.add_argument(
         "--transport",
         choices=["stdio", "sse", "streamable-http"],
-        default="stdio",
-        help="Transport mode: 'stdio' for standard input/output, 'sse' for SSE, 'streamable-http' for http streaming     streaming (default: stdio)",
+        default="streamable-http",
+        help="Transport mode (default: streamable-http)",
     )
     parser.add_argument(
         "--host",
         default=DEFAULT_HOST,
-        help=f"Host to bind HTTP server to when using sse transport (default: {DEFAULT_HOST})",
+        help=f"Bind host for HTTP transports (default: {DEFAULT_HOST})",
     )
     parser.add_argument(
         "--port",
         type=int,
         default=DEFAULT_PORT,
-        help=f"Port to bind HTTP server to when using sse transport (default: {DEFAULT_PORT})",
+        help=f"Bind port for HTTP transports (default: {DEFAULT_PORT})",
     )
     parser.add_argument(
         "--log-level",
@@ -1033,44 +1070,57 @@ Examples:
     )
     parser.add_argument(
         "--api-secret",
-        default=None,
-        #choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-        help="Bearer token used for Chat GPT auth",
+        default=os.environ.get("POB_API_SECRET"),
+        help="Bearer token for auth (also read from POB_API_SECRET env var)",
     )
     args = parser.parse_args()
 
-    # Configure logging
+    log_level_int = getattr(logging, args.log_level)
+
     logging.basicConfig(
-        level=getattr(logging, args.log_level),
+        level=log_level_int,
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
         stream=sys.stderr,
     )
 
+    # uvicorn.run() calls logging.config.dictConfig() internally, which resets
+    # the root logger to WARNING. Pin our own module loggers explicitly so they
+    # keep the requested level regardless of what uvicorn does to root.
+    for _mod in (
+        "api.python.unified_server",
+        "api.python.mcp_server",
+        "api.python.lua_bridge",
+        "api.python.bridge_pool",
+    ):
+        logging.getLogger(_mod).setLevel(log_level_int)
+
     if args.transport == "stdio":
         logger.info("Starting MCP server in stdio mode")
         mcp.run(transport="stdio")
-    elif args.transport == "sse":
-        import uvicorn
-        app = mcp.sse_app()
-        logger.info(f"Starting MCP server in HTTP streaming mode on {args.host}:{args.port}")
-        if args.api_secret:
-            secured_app = ChatGPTAuthMiddleware(app, token=args.api_secret)
-            uvicorn.run(secured_app, host=args.host, port=args.port)
-        else:
-            #mcp.run(transport="sse", host=args.host, port=args.port)
-            uvicorn.run(app, host=args.host, port=args.port)
+
     elif args.transport == "streamable-http":
         import uvicorn
-        app = mcp.streamable_http_app()
+        from .unified_server import build_app
+
+        app = build_app(api_secret=args.api_secret)
         logger.info(
-            "Starting MCP Streamable HTTP server on http://%s:%s/mcp",
+            "Starting unified server (MCP + REST) on http://%s:%s  "
+            "[MCP: /mcp  REST: /api]%s",
+            args.host,
+            args.port,
+            "  [auth: bearer token]" if args.api_secret else "",
+        )
+        uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level.lower())
+
+    elif args.transport == "sse":
+        import uvicorn
+
+        app = mcp.sse_app()
+        logger.info(
+            "Starting MCP SSE server on http://%s:%s (legacy transport, no REST)",
             args.host,
             args.port,
         )
         if args.api_secret:
-            secured_app = ChatGPTAuthMiddleware(app, token=args.api_secret)
-            uvicorn.run(secured_app, host=args.host, port=args.port)
-        else:
-            uvicorn.run(app, host=args.host, port=args.port)
-    #else:
-    #    parser.error(f"Unknown transport: {args.transport}")
+            app = ChatGPTAuthMiddleware(app, token=args.api_secret)
+        uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level.lower())
